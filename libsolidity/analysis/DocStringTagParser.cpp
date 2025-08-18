@@ -211,6 +211,11 @@ bool DocStringTagParser::visit(InlineAssembly const& _assembly)
 								"otherwise only use the NatSpec tag."
 							);
 						_assembly.annotation().markedMemorySafe = true;
+						m_errorReporter.warning(
+							2424_error,
+							_assembly.location(),
+							"Natspec memory safe annotation for inline assembly is deprecated and scheduled for removal in the next breaking version (0.9)."
+						);
 					}
 					else
 						m_errorReporter.warning(

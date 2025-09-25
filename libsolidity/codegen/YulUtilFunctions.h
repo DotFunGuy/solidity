@@ -266,10 +266,10 @@ public:
 	std::string storageArrayPushZeroFunction(ArrayType const& _type);
 
 	/// @returns the name of a function that will clear the storage area given
-	/// by the start and end (exclusive) parameters (slots).
-	/// signature: (start, end)
-	/// if _canOverflow is true, it treats the storage as circular and clears by wrapping around.
-	std::string clearStorageRangeFunction(Type const& _type, bool _canOverflow);
+	/// by the start position and number of slots to clear. The start position is in terms of storage slots and we
+	/// assume that the beginning of the clear range starts at the beginning of the start slot.
+	/// signature: (start, slotCount)
+	std::string clearStorageRangeFunction(Type const& _type);
 
 	/// @returns the name of a function that will clear the given storage array
 	/// signature: (slot) ->
@@ -298,7 +298,7 @@ public:
 	/// The function reverts for too large lengths.
 	std::string arrayAllocationSizeFunction(ArrayType const& _type);
 
-	/// @returns the name of a function that converts a storage slot number
+	/// @returns the name of a function that converts a storage slot number,
 	/// a memory pointer or a calldata pointer to the slot number / memory pointer / calldata pointer
 	/// for the data position of an array which is stored in that slot / memory area / calldata area.
 	std::string arrayDataAreaFunction(ArrayType const& _type);

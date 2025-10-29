@@ -91,9 +91,9 @@ public:
 	constexpr bool isJunk() const noexcept { return kind() == Kind::Junk; }
 	constexpr Kind kind() const noexcept { return m_kind; }
 
-	ControlFlow::FunctionGraphID functionReturnLabel() const noexcept { yulAssert(isFunctionReturnLabel()); return m_payload; }
-	CallSites::CallSiteID functionCallReturnLabel() const noexcept { yulAssert(isFunctionCallReturnLabel()); return m_payload; }
-	SSACFG::ValueId valueID() const noexcept { yulAssert(isValueID()); return {m_payload, m_valueIdKind}; }
+	ControlFlow::FunctionGraphID functionReturnLabel() const { yulAssert(isFunctionReturnLabel()); return m_payload; }
+	CallSites::CallSiteID functionCallReturnLabel() const { yulAssert(isFunctionCallReturnLabel()); return m_payload; }
+	SSACFG::ValueId valueID() const { yulAssert(isValueID()); return {m_payload, m_valueIdKind}; }
 
 	static constexpr StackSlot makeJunk() { return {0, Kind::Junk}; }
 	static constexpr StackSlot makeValueID(SSACFG::ValueId const& _valueID) { return {_valueID.value(), Kind::ValueID, _valueID.kind()}; }
@@ -112,12 +112,10 @@ private:
 	Kind m_kind;
 	SSACFG::ValueId::Kind m_valueIdKind;
 };
-
-// PODness of the slot
-static_assert(sizeof(StackSlot) == 8, "StackSlot should be exactly 8 bytes");
-static_assert(std::is_trivially_copyable_v<StackSlot>, "StackSlot must be trivially copyable");
-static_assert(std::is_standard_layout_v<StackSlot>, "StackSlot must have standard layout");
-static_assert(std::is_trivial_v<StackSlot>, "StackSlot must be trivial");
+static_assert(sizeof(StackSlot) == 8, "Want cache efficiency, benchmark this if you go beyond 8 bytes");
+static_assert(std::is_trivially_copyable_v<StackSlot>, "Should be able to use memcpy semantics");
+static_assert(std::is_standard_layout_v<StackSlot>, "Want to have a predictable layout");
+static_assert(std::is_trivial_v<StackSlot>, "Want to have no init/cpy overhead");
 
 using StackData = std::vector<StackSlot>;
 std::string slotToString(StackSlot const& _slot);
@@ -159,6 +157,26 @@ public:
 	using Slot = StackSlot;
 	using Data = StackData;
 
+	struct Offset
+	{
+		size_t value;
+		auto operator<=>(Offset const&) const = default;
+	};
+	friend constexpr auto operator<=>(Offset lhs, size_t rhs) noexcept { return lhs.value <=> rhs; }
+	friend constexpr auto operator<=>(size_t lhs, Offset rhs) noexcept { return lhs <=> rhs.value; }
+	friend constexpr bool operator==(Offset lhs, size_t rhs) noexcept { return lhs.value == rhs; }
+	friend constexpr bool operator==(size_t lhs, Offset rhs) noexcept { return lhs == rhs.value; }
+
+	struct Depth
+	{
+		size_t value;
+		auto operator<=>(Depth const&) const = default;
+	};
+	friend constexpr auto operator<=>(Depth lhs, size_t rhs) noexcept { return lhs.value <=> rhs; }
+	friend constexpr auto operator<=>(size_t lhs, Depth rhs) noexcept { return lhs <=> rhs.value; }
+	friend constexpr bool operator==(Depth lhs, size_t rhs) noexcept { return lhs.value == rhs; }
+	friend constexpr bool operator==(size_t lhs, Depth rhs) noexcept { return lhs == rhs.value; }
+
 	Stack(
 		Data& _data,
 		Callbacks _callbacks
@@ -173,14 +191,14 @@ public:
 		return m_data->back();
 	}
 
-	void swap(size_t const _depth)
+	void swap(Depth const& _depth)
 	{
-		yulAssert(m_data->size() > _depth);
 		yulAssert(1 <= _depth && _depth <= reachableStackDepth);
-		std::swap((*m_data)[m_data->size() - _depth - 1], m_data->back());
+		std::swap((*m_data)[depthToOffset(_depth).value], m_data->back());
 		if constexpr (!std::is_same_v<Callbacks, NoOpStackManipulationCallbacks>)
-			m_callbacks.swap(_depth);
+			m_callbacks.swap(_depth.value);
 	}
+	void swap(Offset const& _offset) { swap(offsetToDepth(_offset)); }
 
 	template<bool callback=true>
 	void pop()
@@ -199,51 +217,64 @@ public:
 			m_callbacks.push(_slot);
 	}
 
-	void declareJunk(size_t const _depth)
-	{
-		yulAssert(_depth < m_data->size());
-		(*m_data)[m_data->size() - _depth - 1] = Slot::makeJunk();
-	}
+	void declareJunk(Depth const& _depth) { (*m_data)[depthToOffset(_depth).value] = Slot::makeJunk(); }
 
-	Slot const& slot(size_t const _depth) const
-	{
-		yulAssert(_depth < m_data->size());
-		return (*m_data)[m_data->size() - _depth - 1];
-	}
+	Slot const& slot(Depth const& _depth) const { return (*m_data)[depthToOffset(_depth).value]; }
+	Slot const& slot(Offset const& _offset) const { return slot(offsetToDepth(_offset)); }
 
 	void dup(Slot const& _slot)
 	{
-		std::optional<size_t> const depth = slotDepth(_slot);
-		yulAssert(depth, fmt::format("Invalid dup, could not find slot"));
-		yulAssert(1 <= *depth + 1 && *depth + 1 <= reachableStackDepth, "Stack too deep");
-		m_data->push_back((*m_data)[m_data->size() - *depth - 1]);
-		if constexpr (!std::is_same_v<Callbacks, NoOpStackManipulationCallbacks>)
-			m_callbacks.dup(*depth + 1);
+		auto it = findSlot(_slot);
+		yulAssert(it != end(), fmt::format("Invalid dup, could not find slot"));
+		dup(Offset(static_cast<size_t>(std::distance(begin(), it))));
 	}
+
+	void dup(Depth const& _depth)
+	{
+		yulAssert(1 <= _depth + 1 && _depth + 1 <= reachableStackDepth, "Stack too deep");
+		m_data->push_back((*m_data)[depthToOffset(_depth).value]);
+		if constexpr (!std::is_same_v<Callbacks, NoOpStackManipulationCallbacks>)
+			m_callbacks.dup(_depth.value + 1);
+	}
+	void dup(Offset const& _offset)	{ dup(offsetToDepth(_offset)); }
 
 	void pushOrDup(Slot const& _slot)
 	{
-		// todo this is not optimal: sometimes i want to dup even if i could push
-		auto const maybeSlot = slotDepth(_slot);
-		if (maybeSlot && maybeSlot < reachableStackDepth)
-			dup(_slot);
-		else if (canBeFreelyGenerated(_slot))
+		auto const it = findSlot(_slot);
+		if (it != end())
+		{
+			Offset const offset{static_cast<size_t>(std::distance(begin(), it))};
+			auto const depth = offsetToDepth(offset);
+			// if it's on stack and can be reached, dup
+			if (depth < reachableStackDepth)
+			{
+				dup(offset);
+				return;
+			}
+		}
+
+		// if it's not on stack / too deep but can be pushed, push
+		if (canBeFreelyGenerated(_slot))
+		{
 			push(_slot);
-		else
-			// can't dup because too deep and it's also not something we can freely generate
-			yulAssert(false, "Stack too deep.");
+			return;
+		}
+
+		// stack too deep handling via callbacks, call dup anyway
+		if (it != end())
+		{
+			dup({static_cast<size_t>(std::distance(begin(), it))});
+			return;
+		}
+		yulAssert(false, "Invalid state: Tried to dup something that isn't on stack and can't be freely generated.");
 	}
 
-	bool empty() const { return size() == 0; }
+	bool empty() const noexcept { return size() == 0; }
+	size_t size() const noexcept { return m_data->size(); }
 
-	size_t size() const
+	auto findSlot(Slot const& _value) const
 	{
-		return m_data->size();
-	}
-
-	std::optional<size_t> slotDepth(Slot const& _value) const
-	{
-		return util::findOffset((*m_data) | ranges::views::reverse, _value);
+		return ranges::find(begin(), end(), _value);
 	}
 
 	static bool constexpr canBeFreelyGenerated(Slot const& _slot)
@@ -251,26 +282,13 @@ public:
 		return _slot.isLiteralValueID() || _slot.isJunk() || _slot.isFunctionCallReturnLabel();
 	}
 
-	Slot const& operator[](size_t const _index) const { return (*m_data)[_index]; }
+	Slot const& operator[](Offset const& _index) const noexcept { return (*m_data)[_index.value]; }
 	auto begin() const { return ranges::begin(*m_data); }
 	auto end() const { return ranges::end(*m_data); }
 
-	size_t numJunkSlots() const
+	size_t numJunkSlots() const noexcept
 	{
 		return static_cast<size_t>(ranges::count_if(*m_data, [](Slot const& _slot) { return _slot.isJunk(); } ));
-	}
-
-	void addJunkTail(std::ptrdiff_t const _numJunk)
-	{
-		yulAssert(_numJunk >= 0);
-		if (_numJunk == 0)
-			return;
-
-		// append junk (so it's at the stack top)
-		m_data->resize(m_data->size() + static_cast<std::size_t>(_numJunk));
-		std::fill_n(m_data->rbegin(), static_cast<std::size_t>(_numJunk), Slot::makeJunk());
-		// rotate to the right by numJunk elements, now they're in the tail
-		std::rotate(m_data->rbegin(), m_data->rbegin() + static_cast<std::ptrdiff_t>(_numJunk), m_data->rend());
 	}
 
 	Data const& data() const
@@ -281,6 +299,17 @@ public:
 	Callbacks const& callbacks() const { return m_callbacks; }
 
 private:
+	Depth offsetToDepth(Offset const& _offset) const
+	{
+		yulAssert(_offset < size(), "Offset out of range");
+		return {size() - _offset.value - 1};
+	}
+	Offset depthToOffset(Depth const& _depth) const
+	{
+		yulAssert(_depth < size(), "Depth out of range");
+		return {size() - _depth.value - 1};
+	}
+
 	Data* m_data;
 	Callbacks m_callbacks;
 };

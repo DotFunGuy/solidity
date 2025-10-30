@@ -193,7 +193,7 @@ public:
 
 	void swap(Depth const& _depth)
 	{
-		yulAssert(1 <= _depth && _depth <= reachableStackDepth);
+		yulAssert(1 <= _depth.value && _depth.value <= reachableStackDepth);
 		std::swap((*m_data)[depthToOffset(_depth).value], m_data->back());
 		if constexpr (!std::is_same_v<Callbacks, NoOpStackManipulationCallbacks>)
 			m_callbacks.swap(_depth.value);
@@ -224,14 +224,15 @@ public:
 
 	void dup(Slot const& _slot)
 	{
-		auto it = findSlot(_slot);
-		yulAssert(it != end(), fmt::format("Invalid dup, could not find slot"));
-		dup(Offset(static_cast<size_t>(std::distance(begin(), it))));
+		if (auto depth = findSlotDepth(_slot))
+			dup(*depth);
+
+		yulAssert(false, fmt::format("Invalid dup, could not find slot {}", slotToString(_slot)));
 	}
 
 	void dup(Depth const& _depth)
 	{
-		yulAssert(1 <= _depth + 1 && _depth + 1 <= reachableStackDepth, "Stack too deep");
+		yulAssert(1 <= _depth.value + 1 && _depth.value + 1 <= reachableStackDepth, "Stack too deep");
 		m_data->push_back((*m_data)[depthToOffset(_depth).value]);
 		if constexpr (!std::is_same_v<Callbacks, NoOpStackManipulationCallbacks>)
 			m_callbacks.dup(_depth.value + 1);
@@ -240,15 +241,13 @@ public:
 
 	void pushOrDup(Slot const& _slot)
 	{
-		auto const it = findSlot(_slot);
-		if (it != end())
+		std::optional<Depth> slotDepth = findSlotDepth(_slot);
+		if (slotDepth)
 		{
-			Offset const offset{static_cast<size_t>(std::distance(begin(), it))};
-			auto const depth = offsetToDepth(offset);
 			// if it's on stack and can be reached, dup
-			if (depth < reachableStackDepth)
+			if (dupReachable(*slotDepth))
 			{
-				dup(offset);
+				dup(*slotDepth);
 				return;
 			}
 		}
@@ -261,20 +260,31 @@ public:
 		}
 
 		// stack too deep handling via callbacks, call dup anyway
-		if (it != end())
+		if (slotDepth)
 		{
-			dup({static_cast<size_t>(std::distance(begin(), it))});
+			dup(*slotDepth);
 			return;
 		}
 		yulAssert(false, "Invalid state: Tried to dup something that isn't on stack and can't be freely generated.");
 	}
 
+	bool dupReachable(Offset const& _offset) const noexcept { return dupReachable(offsetToDepth(_offset)); }
+	bool dupReachable(Depth const& _depth) const noexcept { return _depth < size() && 1 <= _depth.value + 1 && _depth.value + 1 <= reachableStackDepth; }
+	bool swapReachable(Offset const& _offset) const noexcept { return swapReachable(offsetToDepth(_offset)); }
+	bool swapReachable(Depth const& _depth) const noexcept { return _depth < size() && 1 <= _depth.value && _depth.value <= reachableStackDepth; }
+
 	bool empty() const noexcept { return size() == 0; }
 	size_t size() const noexcept { return m_data->size(); }
 
-	auto findSlot(Slot const& _value) const
+	std::optional<Depth> findSlotDepth(Slot const& _value)
 	{
-		return ranges::find(begin(), end(), _value);
+		auto rview = *this | ranges::views::reverse;
+		auto it = ranges::find(rview, _value);
+
+		if (it == ranges::end(rview))
+			return std::nullopt;
+
+		return Depth{static_cast<size_t>(std::distance(ranges::begin(rview), it))};
 	}
 
 	static bool constexpr canBeFreelyGenerated(Slot const& _slot)
@@ -298,7 +308,6 @@ public:
 
 	Callbacks const& callbacks() const { return m_callbacks; }
 
-private:
 	Depth offsetToDepth(Offset const& _offset) const
 	{
 		yulAssert(_offset < size(), "Offset out of range");
@@ -310,6 +319,7 @@ private:
 		return {size() - _depth.value - 1};
 	}
 
+private:
 	Data* m_data;
 	Callbacks m_callbacks;
 };

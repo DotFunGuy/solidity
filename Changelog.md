@@ -5,6 +5,11 @@ Language Features:
 
 Compiler Features:
 * ethdebug: Experimental support for instructions and source locations under EOF.
+* DocString Parser: Deprecation of inline assembly special comment `memory-safe-assembly`.
+* Syntax Checker: Deprecation of ABI coder v1.
+* Syntax Checker: Deprecation of `virtual` modifiers.
+* Type Checker: Deprecation of `send` and `transfer` functions on instances of `address`.
+* Type Checker: Deprecation of comparisons between `contract`-typed variables.
 
 Bugfixes:
 * Assembler: Fix not using a fixed-width type for IDs being assigned to subassemblies nested more than one level away, resulting in inconsistent `--asm-json` output between target architectures.

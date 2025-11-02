@@ -289,6 +289,8 @@ void ArrayUtils::copyArrayToStorage(ArrayType const& _targetType, ArrayType cons
 			// stack: target_ref target_data_end source_data_pos target_data_pos_updated source_data_end
 			_context << Instruction::POP << Instruction::SWAP1 << Instruction::POP;
 			// stack: target_ref target_data_end target_data_pos_updated
+			_context << Instruction::DUP1 << Instruction::SWAP2 << Instruction::SUB;
+			// stack: target_ref target_data_pos_updated slotCount
 			if (targetBaseType->storageBytes() < 32)
 			{
 				if (!targetType->isDynamicallySized() && !sourceType->isDynamicallySized())
@@ -307,10 +309,10 @@ void ArrayUtils::copyArrayToStorage(ArrayType const& _targetType, ArrayType cons
 							return;
 						}
 					}
-				utils.clearStorageLoop(TypeProvider::uint256(), !targetType->isDynamicallySized());
+				utils.clearStorageLoop(TypeProvider::uint256());
 			}
 			else
-				utils.clearStorageLoop(targetBaseType, !targetType->isDynamicallySized());
+				utils.clearStorageLoop(targetBaseType);
 			_context << Instruction::POP;
 		}
 	);
@@ -604,13 +606,13 @@ void ArrayUtils::clearArray(ArrayType const& _typeIn) const
 			}
 			else
 			{
-				_context << Instruction::DUP1 << _type.length();
+				_context << _type.length();
 				ArrayUtils(_context).convertLengthToSize(_type);
-				_context << Instruction::ADD << Instruction::SWAP1;
+				// stack: storage_ref slotCount
 				if (_type.baseType()->storageBytes() < 32)
-					ArrayUtils(_context).clearStorageLoop(TypeProvider::uint256(), /* _canOverflow */ true);
+					ArrayUtils(_context).clearStorageLoop(TypeProvider::uint256());
 				else
-					ArrayUtils(_context).clearStorageLoop(_type.baseType(), /* _canOverflow */ true);
+					ArrayUtils(_context).clearStorageLoop(_type.baseType());
 				_context << Instruction::POP;
 			}
 			solAssert(_context.stackHeight() == stackHeightStart - 2, "");
@@ -641,17 +643,16 @@ void ArrayUtils::clearDynamicArray(ArrayType const& _type) const
 	}
 	// stack: ref old_length
 	convertLengthToSize(_type);
-	// compute data positions
+	// stack: ref slotCount
 	m_context << Instruction::SWAP1;
 	CompilerUtils(m_context).computeHashStatic();
-	// stack: len data_pos
-	m_context << Instruction::SWAP1 << Instruction::DUP2 << Instruction::ADD
-		<< Instruction::SWAP1;
-	// stack: data_pos_end data_pos
+	// stack: slotCount data_pos
+	m_context << Instruction::SWAP1;
+	// stack: data_pos slotCount
 	if (_type.storageStride() < 32)
-		clearStorageLoop(TypeProvider::uint256(), /* _canOverflow */ false);
+		clearStorageLoop(TypeProvider::uint256());
 	else
-		clearStorageLoop(_type.baseType(), /* _canOverflow */ false);
+		clearStorageLoop(_type.baseType());
 	// cleanup
 	m_context << endTag;
 	m_context << Instruction::POP;
@@ -789,14 +790,14 @@ void ArrayUtils::popStorageArrayElement(ArrayType const& _type) const
 	}
 }
 
-void ArrayUtils::clearStorageLoop(Type const* _type, bool _canOverflow) const
+void ArrayUtils::clearStorageLoop(Type const* _type) const
 {
 	solAssert(_type->storageBytes() >= 32, "");
 	m_context.callLowLevelFunction(
-		"$clearStorageLoop_" + _type->identifier() + (_canOverflow ? "_canOverflow" : "_cannotOverflow"),
+		"$clearStorageLoop_" + _type->identifier(),
 		2,
 		1,
-		[_type, _canOverflow](CompilerContext& _context)
+		[_type](CompilerContext& _context)
 		{
 			unsigned stackHeightStart = _context.stackHeight();
 			if (_type->category() == Type::Category::Mapping)
@@ -804,29 +805,33 @@ void ArrayUtils::clearStorageLoop(Type const* _type, bool _canOverflow) const
 				_context << Instruction::POP;
 				return;
 			}
-			// stack: end_pos pos
+			// stack: start_pos slotCount
+			// Initialize loop counter i = 0
+			_context << u256(0);
+			// stack: start_pos slotCount i
 			evmasm::AssemblyItem loopStart = _context.appendJumpToNew();
 			_context << loopStart;
-			// check for loop condition
-			_context <<
-				Instruction::DUP1 <<
-				Instruction::DUP3;
-			if (_canOverflow)
-				_context << Instruction::EQ;
-			else
-				_context << Instruction::GT << Instruction::ISZERO;
+			// exit loop when i >= slotCount
+			_context << Instruction::DUP1 << Instruction::DUP3 << Instruction::GT << Instruction::ISZERO;
 			evmasm::AssemblyItem zeroLoopEnd = _context.newTag();
 			_context.appendConditionalJumpTo(zeroLoopEnd);
-			// delete
+			// stack: start_pos slotCount i
+			// compute storage position: start_pos + i
+			_context << Instruction::DUP3 << Instruction::DUP2 << Instruction::ADD;
+			// stack: start_pos slotCount i (start_pos+i)
+			// delete storage slot
 			_context << u256(0);
 			StorageItem(_context, *_type).setToZero(SourceLocation(), false);
-			_context << Instruction::POP;
-			// increment
+			_context << Instruction::POP << Instruction::POP;
+			// stack: start_pos slotCount i
+			// increment counter: i += storageSize
 			_context << _type->storageSize() << Instruction::ADD;
 			_context.appendJumpTo(loopStart);
 			// cleanup
 			_context << zeroLoopEnd;
-			_context << Instruction::POP;
+			// stack: start_pos slotCount i
+			_context << Instruction::POP << Instruction::POP;
+			// stack: start_pos
 			solAssert(_context.stackHeight() == stackHeightStart - 1, "");
 		}
 	);

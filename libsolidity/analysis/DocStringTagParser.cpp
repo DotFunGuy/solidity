@@ -214,7 +214,7 @@ bool DocStringTagParser::visit(InlineAssembly const& _assembly)
 						m_errorReporter.warning(
 							2424_error,
 							_assembly.location(),
-							"Natspec memory safe annotation for inline assembly is deprecated and scheduled for removal in the next breaking version (0.9)."
+							"Natspec 'memory-safe-assembly' special comment for inline assembly is deprecated and scheduled for removal in the next breaking version (0.9)."
 						);
 					}
 					else
